@@ -3,8 +3,5 @@ services:
     image: nginx:latest
     ports:
       - "9001:80"
-
-  backend2:
-    image: nginx:latest
-    ports:
-      - "9002:80"
+    volumes: 
+      - ../dummy_backends/backend1:/usr/share/nginx/html
