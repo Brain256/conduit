@@ -18,9 +18,21 @@ Created a Layer 4 (transport layer) TCP load balancer running on port `8080` usi
 
 **Tech stack:** C++17, POSIX sockets, yaml-cpp, CMake, Docker
 
-### benchmarking
+### Benchmarking
 
-Load balancer has been tested with 
+Load balancer performance has been measured using ApacheBench across varying concurrency levels. All tests run against the epoll event loop (Phase 3) with round-robin routing across 3 nginx backends.
+
+**Test commands**
+
+```bash
+ab -n 100 -c 1 http://localhost:8080/
+ab -n 100 -c 10 http://localhost:8080/
+ab -n 500 -c 50 http://localhost:8080/
+ab -n 1000 -c 100 http://localhost:8080/
+ab -n 1000 -c 200 http://localhost:8080/
+```
+
+Raw results are saved in `results/phase3/`.
 
 ## Getting Started
 
