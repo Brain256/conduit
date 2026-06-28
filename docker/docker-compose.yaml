@@ -1,7 +1,21 @@
 services:
   backend1:
-    image: nginx:latest
+    image: nginx:alpine
     ports:
       - "9001:80"
     volumes: 
       - ../dummy_backends/backend1:/usr/share/nginx/html
+  
+  backend2:
+    image: nginx:alpine
+    ports:
+      - "9002:80"
+    volumes: 
+      - ../dummy_backends/backend2:/usr/share/nginx/html
+
+  backend3:
+    image: nginx:alpine
+    ports:
+      - "9003:80"
+    volumes: 
+      - ../dummy_backends/backend3:/usr/share/nginx/html

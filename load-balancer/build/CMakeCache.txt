@@ -218,6 +218,9 @@ conduit_IS_TOP_LEVEL:STATIC=ON
 //Value Computed by CMake
 conduit_SOURCE_DIR:STATIC=/mnt/c/Users/brian/Desktop/Coding/conduit/load-balancer
 
+//The directory containing a CMake configuration file for yaml-cpp.
+yaml-cpp_DIR:PATH=/usr/lib/x86_64-linux-gnu/cmake/yaml-cpp
+
 
 ########################
 # INTERNAL cache entries

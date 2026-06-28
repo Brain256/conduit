@@ -9,3 +9,6 @@ add_executable(conduit
 )
 
 target_compile_options(conduit PRIVATE -Wall -Wextra -g)
+
+find_package(yaml-cpp REQUIRED)
+target_link_libraries(conduit PRIVATE yaml-cpp)
