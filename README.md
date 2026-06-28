@@ -71,7 +71,7 @@ conduit/
 │   ├── app/
 │   └── components/
 ├── docker/                 # Docker Compose and Dockerfiles
-├── backends/               # nginx static HTML files
+├── dummy-backends/               # nginx static HTML files
 ├── results/                # Benchmark results and analysis
 └── README.md
 ```
