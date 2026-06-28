@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(conduit
     src/main.cpp
+    src/thread_pool.cpp
 )
 
 target_compile_options(conduit PRIVATE -Wall -Wextra -g)

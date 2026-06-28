@@ -14,7 +14,7 @@ Conduit is a systems project with three components:
 
 ### Phase 3 Complete — C++ Load Balancer (Layer 4)
 
-Created a Layer 4 (transport layer) TCP load balancer running on port `8080` using an linux epoll event loop. Routes incoming traffic across multiple backend servers using the **round-robin** algorithm. Backends are defined in a YAML config file. Built with raw POSIX TCP sockets — no networking abstractions.
+Created a Layer 4 (transport layer) TCP load balancer running on port `8080` using an linux epoll event loop and multithreading. Routes incoming traffic across multiple backend servers using the **round-robin** algorithm. Backends are defined in a YAML config file. Built with raw POSIX TCP sockets — no networking abstractions.
 
 **Tech stack:** C++17, POSIX sockets, yaml-cpp, CMake, Docker
 
@@ -22,17 +22,30 @@ Created a Layer 4 (transport layer) TCP load balancer running on port `8080` usi
 
 Load balancer performance has been measured using ApacheBench across varying concurrency levels. All tests run against the epoll event loop (Phase 3) with round-robin routing across 3 nginx backends.
 
+Phase 4 work (multithreading and other optimizations) in progress. 
+
 **Test commands**
 
 ```bash
-ab -n 100 -c 1 http://localhost:8080/
-ab -n 100 -c 10 http://localhost:8080/
-ab -n 500 -c 50 http://localhost:8080/
-ab -n 1000 -c 100 http://localhost:8080/
-ab -n 1000 -c 200 http://localhost:8080/
+ab -n 100 -c 1 http://localhost:8080/ 
+ab -n 100 -c 10 http://localhost:8080/ 
+ab -n 500 -c 50 http://localhost:8080/ 
+ab -n 1000 -c 100 http://localhost:8080/ 
+ab -n 1000 -c 200 http://localhost:8080/ 
 ```
 
-Raw results are saved in `results/phase3/`.
+Raw results are saved in `results`.
+
+### Known Load Balancer Improvements
+ 
+Current limitations to be addressed in later phases:
+ 
+- **Blocking `connect()`** — a slow backend parks a worker thread, exhausting the pool under load. Fix: `O_NONBLOCK` + `EINPROGRESS` handling
+- **Global mutex** — all threads contend on one lock per read/write. Fix: per-thread epoll instances eliminate sharing entirely
+- **Unchecked `write()`** — short writes silently drop bytes. Fix: loop until all bytes sent or buffer partial writes
+- **Single `accept()` per wakeup** — leaves connections queued under bursts. Fix: loop until `EAGAIN`
+- **No health checking** — failed backends still receive traffic. Fix: background prober thread (Phase 5)
+- **Round-robin only** — no awareness of backend load. Fix: least-connections and weighted routing (Phase 6)
 
 ## Getting Started
 
