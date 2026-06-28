@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <yaml-cpp/yaml.h>
+#include <sys/epoll.h>
 
 struct Backend {
     std::string host; 
@@ -14,6 +15,13 @@ struct Config {
     int port;
     std::vector<Backend> backends;
 };
+
+struct Connection {
+    int client_fd; 
+    int backend_fd; 
+};
+
+std::unordered_map<int, Connection> connections; 
 
 std::atomic<int> counter{0}; 
 
@@ -38,28 +46,45 @@ Config load_config(const std::string& path) {
     return config; 
 }
 
-void exchange_data(int client_fd, int backend_fd) {
-    char buffer[4096] = {0}; 
+void forward_data(int epoll_fd, int connection_fd) {
+    char buffer[4096] = {0};
+    
+    struct Connection c = connections[connection_fd]; 
 
-    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer)); 
+    ssize_t bytes_read = read(connection_fd, buffer, sizeof(buffer)); 
 
-    write(backend_fd, buffer, bytes_read); 
+    if (bytes_read <= 0) {
+        // no bytes meaning this is epoll saying the connection closed
+        std::cout << "connection closed\n";
 
-    while (true) {
-        std::cout << "reading\n"; 
+        close(c.client_fd); 
+        close(c.backend_fd); 
 
-        bytes_read = read(backend_fd, buffer, sizeof(buffer)); 
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c.client_fd, nullptr); 
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c.backend_fd, nullptr); 
 
-        if (bytes_read <= 0) {
-            std::cout << "no bytes from the backend\n"; 
-            break; 
+        connections.erase(c.client_fd); 
+        connections.erase(c.backend_fd); 
+
+    } else { 
+        // bytes to forward
+        
+        if (connection_fd == c.client_fd) {
+            write(c.backend_fd, buffer, bytes_read); 
+            std::cout << bytes_read << " bytes forwarded to backend\n"; 
+        } else {
+            write(c.client_fd, buffer, bytes_read); 
+            std::cout << bytes_read << " bytes forwarded to client\n"; 
         }
-
-        write(client_fd, buffer, bytes_read); 
     }
 }
 
-void handle_connection(int client_fd, const std::vector<Backend>& backends) {
+void create_connection(int epoll_fd, int balancer_fd, const std::vector<Backend>& backends) {
+
+    struct sockaddr_in client_addr{};
+    socklen_t client_len = sizeof(client_addr);
+
+    int client_fd = accept(balancer_fd, (struct sockaddr*)&client_addr, &client_len); 
 
     int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
     
@@ -77,13 +102,17 @@ void handle_connection(int client_fd, const std::vector<Backend>& backends) {
 
     std::cout << "backend ip connected: " << b.host << ":" << b.port << "\n"; 
 
-    exchange_data(client_fd, backend_fd); 
+    struct epoll_event ev{}; 
+    ev.events = EPOLLIN; 
 
-    std::cout << "backend ip disconnected: " << b.host << ":" << b.port << "\n"; 
+    ev.data.fd = client_fd; 
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev); 
 
-    close(client_fd); 
-    close(backend_fd); 
+    ev.data.fd = backend_fd; 
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, backend_fd, &ev);
 
+    connections[client_fd] = {client_fd, backend_fd}; 
+    connections[backend_fd] = {client_fd, backend_fd}; 
 }
 
 int main() {
@@ -108,19 +137,32 @@ int main() {
 
     listen(balancer_fd, 128); 
 
+    int epoll_fd = epoll_create1(0); 
+
+    struct epoll_event ev{}; 
+    ev.events = EPOLLIN; 
+    ev.data.fd = balancer_fd; 
+
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, balancer_fd, &ev); 
+
     std::cout << "load balancer listening on port " << config.port << "\n"; 
 
-    // socket accept loop
+    // epoll event loop
+    struct epoll_event events[64]; 
+
     while (true) {
-        
-        struct sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
+        int n = epoll_wait(epoll_fd, events, 64, -1); 
 
-        int client_fd = accept(balancer_fd, (struct sockaddr*)&client_addr, &client_len); 
-        std::cout << "connection accepted\n"; 
-
-        handle_connection(client_fd, config.backends); 
-
+        for (int i = 0; i < n; ++i) {
+            
+                if (events[i].data.fd == balancer_fd) {
+                    // new client connection
+                    create_connection(epoll_fd, balancer_fd, config.backends); 
+                } else { 
+                    // existing connection, forward the data
+                    forward_data(epoll_fd, events[i].data.fd); 
+                }
+        }
     }
 
     close(balancer_fd); 

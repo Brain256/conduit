@@ -12,11 +12,15 @@ Conduit is a systems project with three components:
 
 ## Current Progress
 
-### Phase 2 Complete — C++ Load Balancer (Layer 4)
+### Phase 3 Complete — C++ Load Balancer (Layer 4)
 
-A Layer 4 (transport layer) TCP load balancer running on port `8080`. Routes incoming traffic across multiple backend servers using the **round-robin** algorithm. Backends are defined in a YAML config file. Built with raw POSIX TCP sockets — no networking abstractions.
+Created a Layer 4 (transport layer) TCP load balancer running on port `8080` using an linux epoll event loop. Routes incoming traffic across multiple backend servers using the **round-robin** algorithm. Backends are defined in a YAML config file. Built with raw POSIX TCP sockets — no networking abstractions.
 
 **Tech stack:** C++17, POSIX sockets, yaml-cpp, CMake, Docker
+
+### benchmarking
+
+Load balancer has been tested with 
 
 ## Getting Started
 
@@ -49,7 +53,7 @@ The load balancer will start listening on port `8080`.
 ### 3. Send traffic
 
 ```bash
-curl -H "Connection: close" http://localhost:8080
+curl  http://localhost:8080
 ```
 
 Each request will be routed to the next backend in rotation. The response will contain the backend's HTML content confirming which server was hit.
@@ -80,7 +84,7 @@ conduit/
 
 - [x] Phase 1 — Basic TCP proxy (single backend)
 - [x] Phase 2 — Round-robin routing across multiple backends
-- [ ] Phase 3 — epoll event loop (non-blocking I/O)
+- [x] Phase 3 — epoll event loop (non-blocking I/O)
 - [ ] Phase 4 — Thread pool (concurrent connection handling)
 - [ ] Phase 5 — Health checking and automatic failover
 - [ ] Phase 6 — Additional routing algorithms (least-connections, weighted)

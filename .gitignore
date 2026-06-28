@@ -20,3 +20,5 @@ dashboard/node_modules/
 # General
 .DS_Store
 *.log
+
+config.yaml
