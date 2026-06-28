@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/conduit.dir/src/main.cpp.o -o conduit  /usr/lib/x86_64-linux-gnu/libyaml-cpp.so.0.7.0 
