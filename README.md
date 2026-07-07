@@ -27,11 +27,13 @@ Phase 4 work (multithreading and other optimizations) in progress.
 **Test commands**
 
 ```bash
-ab -n 100 -c 1 http://localhost:8080/ 
-ab -n 100 -c 10 http://localhost:8080/ 
-ab -n 500 -c 50 http://localhost:8080/ 
-ab -n 1000 -c 100 http://localhost:8080/ 
-ab -n 1000 -c 200 http://localhost:8080/ 
+ab -n 10000 -c 1 http://localhost:8080/ >> c1.txt
+ab -n 10000 -c 10 http://localhost:8080/ >> c10.txt
+ab -n 10000 -c 50 http://localhost:8080/ >> c50.txt
+ab -n 10000 -c 100 http://localhost:8080/ >> c100.txt
+ab -n 10000 -c 200 http://localhost:8080/ >> c200.txt
+ab -n 10000 -c 500 http://localhost:8080/ >> c500.txt
+ab -n 10000 -c 1000 http://localhost:8080/ >> c1000.txt
 ```
 
 Raw results are saved in `results`.
