@@ -2,7 +2,7 @@ This is ApacheBench, Version 2.3 <$Revision: 1879490 $>
 Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
 Licensed to The Apache Software Foundation, http://www.apache.org/
 
-Benchmarking localhost (be patient).....done
+Benchmarking localhost (be patient)
 
 
 Server Software:        nginx/1.31.2
@@ -13,30 +13,30 @@ Document Path:          /
 Document Length:        11 bytes
 
 Concurrency Level:      1
-Time taken for tests:   1.664 seconds
-Complete requests:      100
+Time taken for tests:   133.059 seconds
+Complete requests:      10000
 Failed requests:        0
-Total transferred:      24100 bytes
-HTML transferred:       1100 bytes
-Requests per second:    60.10 [#/sec] (mean)
-Time per request:       16.640 [ms] (mean)
-Time per request:       16.640 [ms] (mean, across all concurrent requests)
-Transfer rate:          14.14 [Kbytes/sec] received
+Total transferred:      2410000 bytes
+HTML transferred:       110000 bytes
+Requests per second:    75.15 [#/sec] (mean)
+Time per request:       13.306 [ms] (mean)
+Time per request:       13.306 [ms] (mean, across all concurrent requests)
+Transfer rate:          17.69 [Kbytes/sec] received
 
 Connection Times (ms)
               min  mean[+/-sd] median   max
-Connect:        0    0   0.0      0       0
-Processing:     5   16 102.7      6    1034
-Waiting:        4   15 102.8      5    1033
-Total:          5   17 102.8      6    1034
+Connect:        0    0   0.0      0       1
+Processing:     4   13  88.4      5    1934
+Waiting:        3   12  88.4      4    1933
+Total:          4   13  88.4      5    1935
 
 Percentage of the requests served within a certain time (ms)
-  50%      6
-  66%      7
-  75%      7
-  80%      7
-  90%      7
-  95%      8
-  98%     10
-  99%   1034
- 100%   1034 (longest request)
+  50%      5
+  66%      6
+  75%      6
+  80%      6
+  90%      6
+  95%      7
+  98%      8
+  99%     10
+ 100%   1935 (longest request)
