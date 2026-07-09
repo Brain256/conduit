@@ -1,10 +1,11 @@
-package main 
+package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -15,7 +16,7 @@ type Result struct {
 }
 
 func main() {
-	
+
 	port := flag.Int("port", 8080, "Port of the load balancer")
 	duration := flag.Duration("duration", 30*time.Second, "how long to run the test")
 	reqPerSecond := flag.Int("rps", 100, "Number of requests per second")
@@ -38,6 +39,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), dur)
 	defer cancel()
 
+	// defines a timeout
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	}
+
 	// goroutine for rate limiting
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -58,23 +67,23 @@ func main() {
 	}()
 
 	var wg sync.WaitGroup
+	var resultsWg sync.WaitGroup
 
-	// eventually needs a separate goroutine to drain this or else it could cause the script to block
-	results := make(chan Result, rps * int(dur.Seconds()))
+	results := make(chan Result, rps*int(dur.Seconds()))
 
-	// worker goroutines 
+	// worker goroutines
 	for i := 0; i < workers; i++ {
 
 		wg.Add(1)
-		
+
 		go func() {
 			defer wg.Done()
 
 			for range tokens {
 				start := time.Now()
-				resp, err := http.Get(url)
+				resp, err := client.Get(url)
 
-				if err != nil { 
+				if err != nil {
 					results <- Result{err: err}
 					continue
 				}
@@ -86,55 +95,73 @@ func main() {
 
 				resp.Body.Close()
 			}
-		} ()
+		}()
 	}
+
+	resultsWg.Add(1)
+
+	go func() {
+		defer resultsWg.Done()
+
+		for r := range results {
+			if r.err != nil {
+				fmt.Println("error:", r.err)
+				continue
+			}
+
+			latencies = append(latencies, float32(r.latency.Seconds()*1000))
+		}
+	}()
 
 	wg.Wait()
 
 	elapsed := time.Since(overallStart)
 
 	close(results)
-
-	for r := range results {
-		if r.err != nil {
-			fmt.Println("error:", r.err)
-			continue
-		}
-
-		latencies = append(latencies, float32(r.latency.Seconds() * 1000))
-	}
-
-	var sum float32
+	resultsWg.Wait()
 
 	if len(latencies) == 0 {
 		fmt.Println("no successful requests")
 		return
 	}
 
-	minScore := latencies[0]
-	maxScore := latencies[0]
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 
-	for i := 0; i < len(latencies); i++ {
-		sum += latencies[i]
+	var sum float32
 
-		if latencies[i] < minScore {
-			minScore = latencies[i]
-		}
-
-		if latencies[i] > maxScore {
-			maxScore = latencies[i]
-		}
+	for _, latency := range latencies {
+		sum += latency
 	}
+
+	minScore := latencies[0]
+	maxScore := latencies[len(latencies)-1]
+
+	p50 := percentile(latencies, 50)
+	p95 := percentile(latencies, 95)
+	p99 := percentile(latencies, 99)
+
+	throughput := float64(len(latencies)) / elapsed.Seconds()
 
 	fmt.Println("--------------- { config } ---------------")
 	fmt.Println("workers:", workers)
-	fmt.Println("rps:", rps)
+	fmt.Println("requested rps:", rps)
 	fmt.Println("duration:", elapsed.Seconds(), "s")
 
 	fmt.Println("--------------- { results } ---------------")
 	fmt.Println("pings:", len(latencies))
-	fmt.Println("avg:", sum / float32(len(latencies)), "ms")
-	fmt.Println("max:", maxScore, "ms")
+	fmt.Println("throughput (rps):", throughput)
+	fmt.Println("avg:", sum/float32(len(latencies)), "ms")
 	fmt.Println("min:", minScore, "ms")
-	
+	fmt.Println("p50:", p50, "ms")
+	fmt.Println("p95:", p95, "ms")
+	fmt.Println("p99:", p99, "ms")
+	fmt.Println("max:", maxScore, "ms")
+}
+
+func percentile(sorted []float32, p int) float32 {
+	idx := (p * len(sorted)) / 100
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
 }
