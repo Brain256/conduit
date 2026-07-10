@@ -39,7 +39,6 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), dur)
 	defer cancel()
 
-	// defines a timeout
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
@@ -98,13 +97,19 @@ func main() {
 		}()
 	}
 
+	var totalPings int
+	var errorCount int
+
 	resultsWg.Add(1)
 
 	go func() {
 		defer resultsWg.Done()
 
 		for r := range results {
+			totalPings++
+
 			if r.err != nil {
+				errorCount++
 				fmt.Println("error:", r.err)
 				continue
 			}
@@ -128,9 +133,8 @@ func main() {
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 
 	var sum float32
-
-	for _, latency := range latencies {
-		sum += latency
+	for _, l := range latencies {
+		sum += l
 	}
 
 	minScore := latencies[0]
@@ -140,16 +144,19 @@ func main() {
 	p95 := percentile(latencies, 95)
 	p99 := percentile(latencies, 99)
 
-	throughput := float64(len(latencies)) / elapsed.Seconds()
+	achievedRPS := float64(len(latencies)) / elapsed.Seconds()
 
 	fmt.Println("--------------- { config } ---------------")
 	fmt.Println("workers:", workers)
 	fmt.Println("requested rps:", rps)
 	fmt.Println("duration:", elapsed.Seconds(), "s")
 
+	successRate := float64(len(latencies)) / float64(totalPings) * 100
+
 	fmt.Println("--------------- { results } ---------------")
-	fmt.Println("pings:", len(latencies))
-	fmt.Println("throughput (rps):", throughput)
+	fmt.Println("successful pings:", len(latencies), "/", totalPings)
+	fmt.Println("success rate:", successRate)
+	fmt.Println("throughput (rps):", achievedRPS)
 	fmt.Println("avg:", sum/float32(len(latencies)), "ms")
 	fmt.Println("min:", minScore, "ms")
 	fmt.Println("p50:", p50, "ms")
