@@ -5,6 +5,9 @@
 #include <arpa/inet.h>
 #include <yaml-cpp/yaml.h>
 #include <sys/epoll.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <cstring>
 #include "../include/thread_pool.hpp"
 
 
@@ -27,6 +30,12 @@ struct Connection {
 std::unordered_map<int, Connection> connections; 
 std::mutex connections_mutex;
 std::atomic<int> counter{0}; 
+
+bool set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return false;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
+}
 
 Backend pick_backend(const std::vector<Backend>& backends) {
     int index = counter.fetch_add(1) % backends.size(); 
@@ -95,12 +104,29 @@ void forward_data(int epoll_fd, int connection_fd) {
     } else { 
         // bytes to forward
         
+        int fd = 0; 
         if (connection_fd == c.client_fd) {
-            write(c.backend_fd, buffer, bytes_read); 
-            std::cout << bytes_read << " bytes forwarded to backend\n"; 
+            fd = c.backend_fd; 
         } else {
-            write(c.client_fd, buffer, bytes_read); 
-            std::cout << bytes_read << " bytes forwarded to client\n"; 
+            fd = c.client_fd; 
+        }
+
+        ssize_t total_written = 0;
+
+        while (total_written < bytes_read) {
+            ssize_t n = write(fd, buffer + total_written, bytes_read - total_written);
+
+            if (n <= 0) { 
+                break;
+            }
+
+            total_written += n;
+        }
+
+        if (connection_fd == c.client_fd) {
+            std::cout << total_written << " bytes written to backend\n";
+        } else {
+            std::cout << total_written << " bytes written to client\n";
         }
 
         // re-arm
@@ -165,6 +191,7 @@ int main() {
 
     int opt = 1; 
     setsockopt(balancer_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    set_nonblocking(balancer_fd);
 
     // bind socket to config port
     struct sockaddr_in addr{};      
@@ -175,7 +202,7 @@ int main() {
 
     bind(balancer_fd, (struct sockaddr*)&addr, sizeof(addr)); 
 
-    listen(balancer_fd, 128); 
+    listen(balancer_fd, SOMAXCONN); 
 
     int epoll_fd = epoll_create1(0); 
 
@@ -197,15 +224,30 @@ int main() {
             
                 if (events[i].data.fd == balancer_fd) {
                     // new client connection
-                    struct sockaddr_in client_addr{};
-                    socklen_t client_len = sizeof(client_addr);
+                    while (true) {
+                        struct sockaddr_in client_addr{};
+                        socklen_t client_len = sizeof(client_addr);
 
-                    int client_fd = accept(balancer_fd, (struct sockaddr*)&client_addr, &client_len); 
+                        int client_fd = accept(balancer_fd, (struct sockaddr*)&client_addr, &client_len); 
 
-                    thread_pool.submit([epoll_fd, client_fd, &config] () {
-                            create_connection(epoll_fd, client_fd, config.backends); 
+                        if (client_fd < 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                            }
+
+                            if (errno == EINTR) {
+                                continue;
+                            }
+
+                            std::cerr << "accept failed: " << std::strerror(errno) << "\n";
+                            break;
                         }
-                    );
+
+                        thread_pool.submit([epoll_fd, client_fd, &config] () {
+                                create_connection(epoll_fd, client_fd, config.backends); 
+                            }
+                        );
+                    }
                 } else { 
                     // existing connection, forward the data
                     int event_fd = events[i].data.fd; 
