@@ -3,26 +3,69 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"math/rand"
 	"net/http"
-	"time"
+	"sync"
 
-	"github.com/gorilla/websocket"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
+
+type TestRequest struct {
+	Port     int `json:"port"`
+	Duration int `json:"dur"`
+	Rps      int `json:"rps"`
+	Workers  int `json:"workers"`
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true }, // dev only
 }
 
+// sessions maps a test_id to the channel of live frames produced by runTest,
+// letting the stream handler attach to a test started by the start handler.
+var (
+	sessions   = make(map[string]chan MetricFrame)
+	sessionsMu sync.Mutex
+)
+
+func addSession(id string, frames chan MetricFrame) {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	sessions[id] = frames
+}
+
+func takeSession(id string) (chan MetricFrame, bool) {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	frames, ok := sessions[id]
+	delete(sessions, id)
+	return frames, ok
+}
+
 func startTestHandler(w http.ResponseWriter, r *http.Request) {
-	go runTest()
+	var reqData TestRequest
+	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
 	testID := uuid.New().String()
+	frames := make(chan MetricFrame, 64)
+	addSession(testID, frames)
+
+	go runTest(testID, reqData.Port, reqData.Duration, reqData.Rps, reqData.Workers, frames)
+
 	json.NewEncoder(w).Encode(map[string]string{"test_id": testID})
 }
 
 func streamHandler(w http.ResponseWriter, r *http.Request) {
 	testID := r.PathValue("id")
+	frames, ok := takeSession(testID)
+	if !ok {
+		http.Error(w, "unknown test id", http.StatusNotFound)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
@@ -30,27 +73,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	for i := 0; i < 20; i++ {
-		frame := map[string]interface{}{
-			"test_id":         testID,
-			"timestamp":       time.Now().Format(time.RFC3339),
-			"elapsed_seconds": float64(i),
-			"done":            i == 19,
-			"aggregate": map[string]interface{}{
-				"throughput_rps": 4000 + rand.Intn(1000),
-				"p50_ms":         3.0 + rand.Float64(),
-				"p95_ms":         10.0 + rand.Float64()*5,
-				"p99_ms":         25.0 + rand.Float64()*10,
-				"error_count":    0,
-			},
-			"agents":         []interface{}{},
-			"backend_health": []interface{}{},
-			"events":         []interface{}{},
-		}
+	for frame := range frames {
 		if err := conn.WriteJSON(frame); err != nil {
 			return
 		}
-		time.Sleep(1 * time.Second)
 	}
 }
 

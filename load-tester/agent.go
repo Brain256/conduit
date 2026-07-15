@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"net/http"
 	"sort"
@@ -15,26 +14,35 @@ type Result struct {
 	err     error
 }
 
-func runTest() {
+type Aggregate struct {
+	ThroughputRPS float64 `json:"throughput_rps"`
+	P50MS         float32 `json:"p50_ms"`
+	P95MS         float32 `json:"p95_ms"`
+	P99MS         float32 `json:"p99_ms"`
+	ErrorCount    int     `json:"error_count"`
+}
 
-	port := flag.Int("port", 8080, "Port of the load balancer")
-	duration := flag.Duration("duration", 30*time.Second, "how long to run the test")
-	reqPerSecond := flag.Int("rps", 100, "Number of requests per second")
-	numWorkers := flag.Int("workers", 10, "Number of workers sending requests")
+type MetricFrame struct {
+	TestID         string    `json:"test_id"`
+	Timestamp      string    `json:"timestamp"`
+	ElapsedSeconds float64   `json:"elapsed_seconds"`
+	Done           bool      `json:"done"`
+	Aggregate      Aggregate `json:"aggregate"`
+	Agents         []any     `json:"agents"`
+	BackendHealth  []any     `json:"backend_health"`
+	Events         []any     `json:"events"`
+}
 
-	flag.Parse()
+// runTest drives the load test and emits one MetricFrame per second over out.
+// out is closed when the test finishes so the stream handler's range loop ends.
+func runTest(testID string, port, duration, rps, workers int, out chan<- MetricFrame) {
+	defer close(out)
 
-	var latencies []float32
-
-	dur := *duration
-	rps := *reqPerSecond
-	workers := *numWorkers
-	url := fmt.Sprintf("http://localhost:%d", *port)
+	dur := time.Duration(duration) * time.Second
+	url := fmt.Sprintf("http://localhost:%d", port)
 
 	tokens := make(chan struct{}, rps)
 	interval := time.Second / time.Duration(rps)
-
-	overallStart := time.Now()
 
 	ctx, cancel := context.WithTimeout(context.Background(), dur)
 	defer cancel()
@@ -46,7 +54,7 @@ func runTest() {
 		},
 	}
 
-	// goroutine for rate limiting
+	// rate limiter
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -65,104 +73,94 @@ func runTest() {
 		}
 	}()
 
+	results := make(chan Result, rps)
+
 	var wg sync.WaitGroup
-	var resultsWg sync.WaitGroup
-
-	results := make(chan Result, rps*int(dur.Seconds()))
-
-	// worker goroutines
 	for i := 0; i < workers; i++ {
-
 		wg.Add(1)
-
 		go func() {
 			defer wg.Done()
-
 			for range tokens {
 				start := time.Now()
 				resp, err := client.Get(url)
-
 				if err != nil {
 					results <- Result{err: err}
 					continue
 				}
-
-				latency := time.Since(start)
-				fmt.Println("ping response time:", latency)
-
-				results <- Result{latency: latency}
-
+				results <- Result{latency: time.Since(start)}
 				resp.Body.Close()
 			}
 		}()
 	}
 
-	var totalPings int
-	var errorCount int
-
-	resultsWg.Add(1)
-
 	go func() {
-		defer resultsWg.Done()
-
-		for r := range results {
-			totalPings++
-
-			if r.err != nil {
-				errorCount++
-				fmt.Println("error:", r.err)
-				continue
-			}
-
-			latencies = append(latencies, float32(r.latency.Seconds()*1000))
-		}
+		wg.Wait()
+		close(results)
 	}()
 
-	wg.Wait()
+	overallStart := time.Now()
+	lastEmit := overallStart
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
-	elapsed := time.Since(overallStart)
+	var window []float32 
+	var errorCount int
 
-	close(results)
-	resultsWg.Wait()
+	emit := func(done bool) {
+		now := time.Now()
+		windowSeconds := now.Sub(lastEmit).Seconds()
+		lastEmit = now
 
-	if len(latencies) == 0 {
-		fmt.Println("no successful requests")
-		return
+		out <- buildFrame(testID, now.Sub(overallStart).Seconds(), window, windowSeconds, errorCount, done)
+		window = window[:0]
 	}
 
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	for {
+		select {
+		case r, ok := <-results:
+			if !ok {
+				emit(true)
+				return
+			}
+			if r.err != nil {
+				errorCount++
+				continue
+			}
+			window = append(window, float32(r.latency.Seconds()*1000))
+		case <-ticker.C:
+			emit(false)
+		}
+	}
+}
 
-	var sum float32
-	for _, l := range latencies {
-		sum += l
+// buildFrame computes aggregate metrics for the latencies gathered in one window.
+func buildFrame(testID string, elapsed float64, latencies []float32, windowSeconds float64, errorCount int, done bool) MetricFrame {
+	agg := Aggregate{ErrorCount: errorCount}
+
+	if windowSeconds > 0 {
+		agg.ThroughputRPS = float64(len(latencies)) / windowSeconds
 	}
 
-	minScore := latencies[0]
-	maxScore := latencies[len(latencies)-1]
+	if len(latencies) > 0 {
+		sorted := make([]float32, len(latencies))
+		copy(sorted, latencies)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 
-	p50 := percentile(latencies, 50)
-	p95 := percentile(latencies, 95)
-	p99 := percentile(latencies, 99)
+		agg.P50MS = percentile(sorted, 50)
+		agg.P95MS = percentile(sorted, 95)
+		agg.P99MS = percentile(sorted, 99)
+	}
 
-	achievedRPS := float64(len(latencies)) / elapsed.Seconds()
-
-	fmt.Println("--------------- { config } ---------------")
-	fmt.Println("workers:", workers)
-	fmt.Println("requested rps:", rps)
-	fmt.Println("duration:", elapsed.Seconds(), "s")
-
-	successRate := float64(len(latencies)) / float64(totalPings) * 100
-
-	fmt.Println("--------------- { results } ---------------")
-	fmt.Println("successful pings:", len(latencies), "/", totalPings)
-	fmt.Println("success rate:", successRate)
-	fmt.Println("throughput (rps):", achievedRPS)
-	fmt.Println("avg:", sum/float32(len(latencies)), "ms")
-	fmt.Println("min:", minScore, "ms")
-	fmt.Println("p50:", p50, "ms")
-	fmt.Println("p95:", p95, "ms")
-	fmt.Println("p99:", p99, "ms")
-	fmt.Println("max:", maxScore, "ms")
+	return MetricFrame{
+		TestID:         testID,
+		Timestamp:      time.Now().Format(time.RFC3339),
+		ElapsedSeconds: elapsed,
+		Done:           done,
+		Aggregate:      agg,
+		Agents:         []any{},
+		BackendHealth:  []any{},
+		Events:         []any{},
+	}
 }
 
 func percentile(sorted []float32, p int) float32 {
