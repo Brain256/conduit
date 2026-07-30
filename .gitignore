@@ -13,9 +13,17 @@ compile_commands.json
 load-tester/bin/
 *.exe
 
-# Next.js
-dashboard/.next/
+# Dashboard
+dashboard/dist/
 dashboard/node_modules/
+
+# Editor / tooling
+.vscode/
+.idea/
+
+# Local planning and spec notes
+.kiro/
+phases.md
 
 # General
 .DS_Store
