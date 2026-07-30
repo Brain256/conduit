@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -51,9 +52,15 @@ func startTestHandler(w http.ResponseWriter, r *http.Request) {
 
 	testID := uuid.New().String()
 	frames := make(chan MetricFrame, 64)
+	run := NewTestRun(testID, TestParameters{
+		Port:            reqData.Port,
+		DurationSeconds: reqData.Duration,
+		TargetRPS:       reqData.Rps,
+		Workers:         reqData.Workers,
+	}, time.Now().UTC())
 	addSession(testID, frames)
 
-	go runTest(testID, reqData.Port, reqData.Duration, reqData.Rps, reqData.Workers, frames)
+	go runTest(run, frames)
 
 	json.NewEncoder(w).Encode(map[string]string{"test_id": testID})
 }

@@ -1,32 +1,43 @@
-import { useEffect, useState, useRef } from 'react';
-import type { MetricFrame } from '../types/metrics';
+import { useEffect, useRef } from 'react';
 
-export function useMetricsStream(testId: string | null) {
-  const [frames, setFrames] = useState<MetricFrame[]>([]);
-  const [isDone, setIsDone] = useState(false);
+export interface MetricsStreamCallbacks {
+  /** Reduces one parsed stream value and reports whether it accepted a terminal summary. */
+  onFrame: (frame: unknown) => { acceptedTerminalSummary: boolean };
+  /** Runs only for a stream close that was not caused by changing the active test. */
+  onClose: (testId: string, followedAcceptedTerminalSummary: boolean) => void;
+}
+
+/**
+ * Owns only the active stream socket. App-shell reducers own all stream data and
+ * browser-session retention, which keeps them independent of this hook's lifecycle.
+ */
+export function useMetricsStream(testId: string | null, callbacks: MetricsStreamCallbacks) {
+  const callbacksRef = useRef(callbacks);
   const wsRef = useRef<WebSocket | null>(null);
+  useEffect(() => { callbacksRef.current = callbacks; }, [callbacks]);
 
   useEffect(() => {
     if (!testId) return;
 
-    setFrames([]);
-    setIsDone(false);
+    let cleanedUp = false;
+    let acceptedTerminalSummary = false;
+    const socket = new WebSocket(`ws://localhost:8081/test/${testId}/stream`);
+    wsRef.current = socket;
 
-    const ws = new WebSocket(`ws://localhost:8081/test/${testId}/stream`);
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      const frame: MetricFrame = JSON.parse(event.data);
-      setFrames(prev => [...prev, frame]);
-      if (frame.done) setIsDone(true);
+    socket.onmessage = (event) => {
+      let frame: unknown;
+      try { frame = JSON.parse(String(event.data)); } catch { frame = null; }
+      const result = callbacksRef.current.onFrame(frame);
+      acceptedTerminalSummary ||= result.acceptedTerminalSummary;
     };
-
-    ws.onerror = (err) => console.error('WS error:', err);
+    socket.onclose = () => {
+      if (!cleanedUp) callbacksRef.current.onClose(testId, acceptedTerminalSummary);
+    };
 
     return () => {
-      ws.close();
+      cleanedUp = true;
+      if (wsRef.current === socket) wsRef.current = null;
+      socket.close();
     };
   }, [testId]);
-
-  return { frames, isDone };
 }
