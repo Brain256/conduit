@@ -127,7 +127,7 @@ func runTest(run *TestRun, out chan<- MetricFrame) {
 		close(completions)
 	}()
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(time.Second / 10)
 	defer ticker.Stop()
 	for {
 		select {

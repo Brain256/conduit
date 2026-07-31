@@ -1,19 +1,25 @@
 # Conduit
 
-**A Layer 4 TCP load balancer written from scratch in C++, a Go load-testing service, and a React dashboard that streams live latency and throughput while a test runs.**
+**A Layer 4 TCP load balancer written from scratch in C++, with a Go load-testing CLI that
+drives traffic through it and reports latency percentiles and achieved throughput.**
 
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 
-No networking libraries, no load-testing frameworks, no charting service — raw POSIX sockets
-and an `epoll` event loop underneath, a hand-rolled metrics pipeline in the middle, and a
-browser reading it live over a WebSocket.
+No networking libraries and no load-testing frameworks — raw POSIX sockets and an `epoll`
+event loop underneath, a hand-rolled metrics pipeline on top.
 
-![Conduit dashboard during a live test](docs/images/live-test.gif)
+---
 
-![Conduit dashboard after a completed test](docs/images/dashboard.png)
+## Project status
+
+The **load balancer** and the **CLI load tester** are the working, supported path. Run the
+balancer, point the CLI at it, read the percentile table. That's the loop this repo is built
+around today.
+
+The **React dashboard** are a work in progress. The code for the go agent with websockets streaming is in `load-tester/` (root package) and a React client in `dashboard/` 
 
 ---
 
@@ -21,12 +27,8 @@ browser reading it live over a WebSocket.
 
 ```mermaid
 flowchart LR
-    subgraph browser["Browser"]
-        D["Dashboard<br/>React + Vite<br/>:5173"]
-    end
-
-    subgraph go["Go service"]
-        T["Load tester<br/>:8081"]
+    subgraph go["Go CLI"]
+        T["load tester<br/>cmd/loadtest"]
     end
 
     subgraph cpp["C++ service"]
@@ -39,8 +41,6 @@ flowchart LR
         B3[":9003"]
     end
 
-    D -->|"POST /test/start"| T
-    T -.->|"WS /test/{id}/stream<br/>MetricFrame @ 1 Hz"| D
     T -->|"HTTP GET x N workers"| LB
     LB -->|round-robin| B1
     LB --> B2
@@ -53,48 +53,21 @@ byte forwarding onto a thread pool sized to `std::thread::hardware_concurrency()
 accepted client is paired with a backend chosen round-robin from a YAML config, and both
 file descriptors are registered with the same event loop. No `libevent`, no framework.
 
-**Load tester** (`load-tester/`) — a Go service that drives configurable load at an HTTP
-target and streams observability data back. Worker goroutines pull from a token-bucket
-rate limiter and submit *immutable completion facts* to a single-owner `TestRun` reducer.
-Because only the reducer mutates counters, latency samples, the latest packet, and the
-pending event queue, a frame can never observe half-written state. It emits one
-`MetricFrame` per second plus exactly one terminal frame carrying the whole-test summary.
-
-**Dashboard** (`dashboard/`) — a React + TypeScript client that validates every incoming
-frame before it touches state. Live observation is scoped to the active test and resets on
-switch; completed-test summaries live in a separate app-shell map so they survive socket
-closure and in-app navigation. Reducers are split by concern
-(`state/activeObservation.ts`, `state/timeline.ts`, `state/sessionFinals.ts`) and
-components stay purely presentational.
-
----
-
-## Features
-
-- **Live latency and throughput charts** — cumulative p50/p95/p99 and achieved RPS plotted
-  against elapsed test time, with a per-datum detail readout on hover
-  (`dashboard/src/components/Charts.tsx`).
-- **Request/response packet inspector** — the most recent completed request, showing full
-  method, URL, headers, and body on both sides, or the failure that replaced the response
-  (`dashboard/src/components/PacketView.tsx`).
-- **Event timeline** — test lifecycle and failure events, deduplicated on first receipt by
-  `event_id` and held in stable ascending timestamp order (`dashboard/src/state/timeline.ts`).
-- **Retained final summaries** — every completed test in the browser session keeps its
-  summary and an immutable, deep-frozen export snapshot, independent of the live stream
-  (`dashboard/src/state/sessionFinals.ts`).
-- **One-click export** — generates a standalone SVG latency graph with no JavaScript, no
-  external fonts, and no network dependencies, plus the JSON source data behind it
-  (`dashboard/src/export/exportFinalSummary.ts`).
+**Load tester CLI** (`load-tester/cmd/loadtest/`) — a single-file Go program. A ticker
+goroutine fills a token bucket at the requested RPS; N worker goroutines pull tokens, issue
+requests, and push outcomes onto a results channel that one collector goroutine drains. When
+the context deadline expires the token producer closes the channel, workers drain and exit,
+and the collector's samples are sorted for the percentile report.
 
 ---
 
 ## Quick start
 
 > The load balancer uses Linux `epoll`, so it must be built and run on Linux or WSL2. The Go
-> service and dashboard run anywhere.
+> CLI runs anywhere.
 
 **Prerequisites:** Docker (with WSL2 integration on Windows), CMake 3.16+, a C++17 compiler,
-`yaml-cpp` (`sudo apt install libyaml-cpp-dev`), Go 1.22+, Node 18+.
+`yaml-cpp` (`sudo apt install libyaml-cpp-dev`), Go 1.22+.
 
 ### 1. Start the backend servers
 
@@ -121,65 +94,38 @@ Listens on `8080` and round-robins across the backends listed in `config.yaml`.
 
 ```bash
 cd load-tester
-go run .
+go run ./cmd/loadtest -port 8080 -rps 500 -workers 20 -duration 30s
 ```
 
-Listens on `8081`. Use `go run .` and not `go run main.go` — the package spans three files.
-
-### 4. Run the dashboard
-
-```bash
-cd dashboard
-npm install
-npm run dev
-```
-
-Open http://localhost:5173, set **Port** `8080` (the load balancer), pick a duration, target
-RPS, and worker count, and hit **Start Test**. Charts fill in once per second; the summary
-and export controls appear when the run completes.
-
----
-
-## API
-
-The Go service exposes two endpoints. The dashboard is one client of them — `curl` and
-`websocat` work just as well.
-
-| Method | Path | Purpose |
+| Flag | Default | Meaning |
 | --- | --- | --- |
-| `POST` | `/test/start` | Start a test. Body `{ "port": 8080, "dur": 30, "rps": 1000, "workers": 10 }` → `{ "test_id": "<uuid>" }` |
-| `GET` | `/test/{id}/stream` | Upgrade to a WebSocket and receive `MetricFrame`s until the stream closes. One consumer per test. |
+| `-port` | `8080` | Port on `localhost` to target |
+| `-rps` | `100` | Requested requests per second |
+| `-workers` | `10` | Concurrent worker goroutines |
+| `-duration` | `30s` | How long to run (any Go duration string) |
 
-Frames arrive once per second, with a single terminal frame (`done: true`) carrying
-`final_summary`:
+Output (shape only — numbers are illustrative, not a measured result):
 
-```jsonc
-{
-  "test_id": "…",
-  "timestamp": "2026-07-30T18:04:11Z",
-  "elapsed_seconds": 12,
-  "done": false,
-  "aggregate": {
-    "throughput_rps": 942.7,
-    "completed_count": 11312,
-    "failed_count": 0,
-    "p50_ms": 1.8, "p95_ms": 7.4, "p99_ms": 19.2
-  },
-  "request_response_record": {
-    "completed_at": "2026-07-30T18:04:10Z",
-    "ping_ms": 1.6,
-    "request":  { "method": "GET", "target_url": "http://localhost:8080", "headers": {}, "body": "" },
-    "response": { "status_code": 200, "headers": {}, "body": "…" }
-    // …or "failure": "<non-empty reason>" instead of "response"
-  },
-  "events": [ { "event_id": "…", "type": "test-started", "message": "Test started." } ],
-  "agents": [],
-  "backend_health": []
-}
+```
+--------------- { config } ---------------
+workers: 20
+requested rps: 500
+duration: 30.002 s
+--------------- { results } ---------------
+successful pings: 14998 / 15000
+success rate: 99.98666
+throughput (rps): 499.9
+avg: 2.13 ms
+min: 0.71 ms
+p50: 1.8 ms
+p95: 7.4 ms
+p99: 19.2 ms
+max: 84.3 ms
 ```
 
-Wire types are defined in `load-tester/test_run.go` and mirrored exactly in
-`dashboard/src/types/metrics.ts`.
+Requested RPS is a ceiling, not a guarantee. If workers can't keep up, the token bucket drops
+tokens rather than queueing them, so achieved throughput falls below the request while
+latency stays honest.
 
 ---
 
@@ -193,36 +139,34 @@ conduit/
 │   ├── include/thread_pool.hpp
 │   ├── config.example.yaml
 │   └── CMakeLists.txt
-├── load-tester/            # Go load-testing service
-│   ├── main.go             # REST + WebSocket handlers, session map
-│   ├── agent.go            # worker pool, rate limiting, request execution
-│   ├── test_run.go         # wire types + single-owner TestRun reducer
+├── load-tester/            # Go module
+│   ├── cmd/loadtest/       # CLI load tester  ← the supported entry point
+│   │   └── main.go
+│   ├── main.go             # parked: REST + WebSocket handlers, session map
+│   ├── agent.go            # parked: worker pool, rate limiting, frame emission
+│   ├── test_run.go         # parked: wire types + single-owner TestRun reducer
 │   └── agent_test.go
-├── dashboard/              # React + TypeScript + Vite client
-│   └── src/
-│       ├── components/     # Charts, PacketView, Timeline, FinalSummary, TestConfig
-│       ├── hooks/          # useMetricsStream — owns the socket only
-│       ├── state/          # activeObservation, timeline, sessionFinals reducers
-│       ├── export/         # standalone SVG + JSON export
-│       └── types/          # wire contract mirroring the Go types
+├── dashboard/              # parked: React + TypeScript + Vite client
 ├── docker/                 # docker-compose for the nginx backend fleet
 ├── dummy-backends/         # static HTML served by each backend
 └── results/                # raw ApacheBench output
 ```
+
+Two `main` packages live in one module: `load-tester/` (the parked service) and
+`load-tester/cmd/loadtest/` (the CLI). `go run .` starts the service; `go run ./cmd/loadtest`
+runs the CLI. `go build ./...` builds both.
 
 ---
 
 ## Testing
 
 ```bash
-cd load-tester && go test ./...          # request-execution outcome capture
-cd dashboard   && npm run lint           # ESLint
-cd dashboard   && npm run build          # type-check + production build
+cd load-tester && go vet ./...           # both packages
+cd load-tester && go test ./...          # request-execution outcome capture (parked service)
 ```
 
-Dashboard property and component tests are specified but not yet written — the reducers were
-designed against a set of numbered correctness properties, and encoding those as
-`fast-check` properties is outstanding work.
+The CLI has no tests yet. `agent_test.go` covers the parked streaming agent's
+request-execution path and still passes.
 
 ---
 
@@ -258,17 +202,46 @@ Deliberate scope cuts and known weak points, kept here rather than hidden:
 - **No health checking** — failed backends still receive traffic.
 - **Round-robin only** — no awareness of backend load.
 
-**Load tester**
+**Load tester CLI**
 
 - Sends `GET` to the root path on `localhost` only; no method, path, header, or body
-  configuration yet.
+  configuration.
 - Keep-alives are disabled, so every request opens a fresh TCP connection. This measures
   connection setup as well as service time — intentional for exercising the load balancer,
   but not representative of a keep-alive client.
+- Latency is measured to response headers, not to a fully-read body; response bodies are
+  closed without being read.
+- Prints a line per request to stdout. At high RPS that I/O contends with the workers doing
+  the measuring and will inflate the numbers it reports.
+- Error outcomes are counted internally but the count is never printed — the success line
+  (`successful pings: N / M`) is the only place failures show up.
+
+---
+
+## Parked: streaming dashboard
+
+An earlier iteration wrapped the load tester in an HTTP + WebSocket service and streamed
+`MetricFrame`s to a React dashboard with live charts, a packet inspector, an event timeline,
+and SVG export. All of it is still in the tree and still builds.
+
+It's parked rather than deleted because the interesting parts are worth salvaging: the
+single-owner `TestRun` reducer in `load-tester/test_run.go`, where workers submit immutable
+completion facts and only the reducer mutates state, so a frame can never observe
+half-written data. What needs rework before it comes back:
+
+- Frames emit at a fixed 1 Hz (`load-tester/agent.go:130`), and each frame carries at most
+  one request/response record — so at any meaningful RPS the inspector shows an arbitrary
+  sample rather than a stream.
+- `aggregateAt` re-sorts the full latency slice per frame, and `latestEligibleRecord` scans
+  every completion ever recorded. Both are fine at 1 Hz and degrade badly above it.
+- `completions` and `latencies` grow unbounded for the life of a run.
 - Full request and response bodies are held in memory and streamed to the browser with no
   size cap or redaction.
 - CORS is `*` and the WebSocket origin check always passes. Both are dev-only and must not
   be deployed as-is.
+
+To run it anyway: `cd load-tester && go run .` (listens on `:8081`), then
+`cd dashboard && npm install && npm run dev`.
 
 ---
 
@@ -278,9 +251,9 @@ Deliberate scope cuts and known weak points, kept here rather than hidden:
 - [x] Round-robin routing across multiple backends
 - [x] `epoll` event loop with non-blocking I/O
 - [x] Thread pool for concurrent connection handling
+- [x] Go load-testing CLI with percentile reporting
 - [ ] Health checking and automatic failover
 - [ ] Least-connections and weighted routing
-- [x] Go load-testing agent
-- [ ] Distributed coordinator with gRPC metric aggregation across multiple agents
-- [x] Live dashboard with WebSocket metric streaming
 - [ ] Re-benchmark the current build and publish results
+- [ ] Configurable request method, path, headers, and body
+- [ ] Revisit streaming metrics on a batched frame model
