@@ -1,5 +1,6 @@
 # C++ build output
 build/
+build-*/
 *.o
 *.a
 
@@ -30,3 +31,6 @@ phases.md
 *.log
 
 config.yaml
+
+# testing data
+results/phase5/

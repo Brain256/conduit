@@ -27,9 +27,16 @@ struct Connection {
     bool closed = false;
 };
 
-std::unordered_map<int, Connection> connections; 
+std::unordered_map<int, Connection> connections;
 std::mutex connections_mutex;
-std::atomic<int> counter{0}; 
+// unsigned: a signed counter wraps to negative after 2^31 connections, and a
+// negative index into backends is out-of-bounds UB.
+std::atomic<unsigned> counter{0};
+
+// Per-connection and per-chunk tracing. Off by default: these sit on the data
+// path, where an unbuffered stream write costs a syscall and takes the global
+// iostream lock. Compiled out entirely in an optimized build.
+constexpr bool kVerbose = false;
 
 bool set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -37,9 +44,9 @@ bool set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
 }
 
-Backend pick_backend(const std::vector<Backend>& backends) {
-    int index = counter.fetch_add(1) % backends.size(); 
-    return backends[index]; 
+const Backend& pick_backend(const std::vector<Backend>& backends) {
+    unsigned index = counter.fetch_add(1, std::memory_order_relaxed) % backends.size();
+    return backends[index];
 }
 
 Config load_config(const std::string& path) {
@@ -76,32 +83,41 @@ void forward_data(int epoll_fd, int connection_fd) {
     if (bytes_read <= 0) {
         // no bytes meaning this is epoll saying the connection closed
 
+        int closed_client_fd = -1;
+
         {
             std::lock_guard<std::mutex> lock(connections_mutex);
 
             auto it = connections.find(connection_fd);
 
             if (it == connections.end()) return;
-            if (it->second.closed) return;  
+            if (it->second.closed) return;
 
             it->second.closed = true;
 
             int client_fd = it->second.client_fd;
             int backend_fd = it->second.backend_fd;
 
-            std::cerr << "connection closed fd=" << client_fd << "\n";
+            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, backend_fd, nullptr);
 
-            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr); 
-            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, backend_fd, nullptr); 
+            close(client_fd);
+            close(backend_fd);
 
-            close(client_fd); 
-            close(backend_fd); 
+            connections.erase(client_fd);
+            connections.erase(backend_fd);
 
-            connections.erase(client_fd); 
-            connections.erase(backend_fd); 
+            closed_client_fd = client_fd;
         }
 
-    } else { 
+        // Logged outside the lock: std::cerr is unit-buffered, so doing this
+        // inside the critical section put a write(2) syscall on a mutex every
+        // task in the program contends for.
+        if (kVerbose) {
+            std::cerr << "connection closed fd=" << closed_client_fd << "\n";
+        }
+
+    } else {
         // bytes to forward
         
         int fd = 0; 
@@ -123,10 +139,12 @@ void forward_data(int epoll_fd, int connection_fd) {
             total_written += n;
         }
 
-        if (connection_fd == c.client_fd) {
-            std::cout << total_written << " bytes written to backend\n";
-        } else {
-            std::cout << total_written << " bytes written to client\n";
+        if (kVerbose) {
+            if (connection_fd == c.client_fd) {
+                std::cout << total_written << " bytes written to backend\n";
+            } else {
+                std::cout << total_written << " bytes written to client\n";
+            }
         }
 
         // re-arm
@@ -140,20 +158,22 @@ void forward_data(int epoll_fd, int connection_fd) {
 void create_connection(int epoll_fd, int client_fd, const std::vector<Backend>& backends) {
 
     int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
-    
+
     // choose next backend server (round robin)
-    Backend b = pick_backend(backends); 
+    const Backend& b = pick_backend(backends);
 
-    // connect backend socket 
-    struct sockaddr_in addr{};      
+    // connect backend socket
+    struct sockaddr_in addr{};
 
-    addr.sin_family = AF_INET;     
-    addr.sin_port = htons(b.port);  
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(b.port);
     inet_pton(AF_INET, b.host.c_str(), &addr.sin_addr);
 
-    connect(backend_fd, (struct sockaddr*)&addr, sizeof(addr)); 
+    connect(backend_fd, (struct sockaddr*)&addr, sizeof(addr));
 
-    std::cout << "backend ip connected: " << b.host << ":" << b.port << "\n"; 
+    if (kVerbose) {
+        std::cout << "backend ip connected: " << b.host << ":" << b.port << "\n";
+    }
 
     {
         std::lock_guard<std::mutex> lock(connections_mutex); 
@@ -170,15 +190,22 @@ void create_connection(int epoll_fd, int client_fd, const std::vector<Backend>& 
     ev.data.fd = backend_fd; 
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, backend_fd, &ev);
 
-    std::cerr << "registered client_fd=" << client_fd 
-          << " backend_fd=" << backend_fd << " with epoll\n";
+    if (kVerbose) {
+        std::cerr << "registered client_fd=" << client_fd
+              << " backend_fd=" << backend_fd << " with epoll\n";
+    }
 }
 
 int main() {
 
-    int num_threads = std::thread::hardware_concurrency(); 
+    std::ios::sync_with_stdio(false);
 
-    ThreadPool thread_pool(num_threads); 
+    // hardware_concurrency() is allowed to return 0, which would build a pool
+    // with no workers: connections get accepted and then never served.
+    unsigned num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4;
+
+    ThreadPool thread_pool(num_threads);
 
     std::cout << "thread pool opened with " << num_threads << " threads\n"; 
 
@@ -212,7 +239,9 @@ int main() {
 
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, balancer_fd, &ev); 
 
-    std::cout << "load balancer listening on port " << config.port << "\n"; 
+    // endl, not "\n": sync_with_stdio(false) leaves cout buffered, and this
+    // process never exits, so an unflushed startup banner is never seen.
+    std::cout << "load balancer listening on port " << config.port << std::endl;
 
     // epoll event loop
     struct epoll_event events[64]; 
