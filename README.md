@@ -158,18 +158,6 @@ runs the CLI. `go build ./...` builds both.
 
 ---
 
-## Testing
-
-```bash
-cd load-tester && go vet ./...           # both packages
-cd load-tester && go test ./...          # request-execution outcome capture (parked service)
-```
-
-The CLI has no tests yet. `agent_test.go` covers the parked streaming agent's
-request-execution path and still passes.
-
----
-
 ## Benchmarking
 
 The load balancer has been benchmarked with ApacheBench across concurrency levels from 1 to
@@ -218,27 +206,11 @@ Deliberate scope cuts and known weak points, kept here rather than hidden:
 
 ---
 
-## Parked: streaming dashboard
+## streaming dashboard (work in progress, ui needs improvement)
 
-An earlier iteration wrapped the load tester in an HTTP + WebSocket service and streamed
+A React and Typescript that wraps the load tester in an HTTP + WebSocket service and streamed
 `MetricFrame`s to a React dashboard with live charts, a packet inspector, an event timeline,
 and SVG export. All of it is still in the tree and still builds.
-
-It's parked rather than deleted because the interesting parts are worth salvaging: the
-single-owner `TestRun` reducer in `load-tester/test_run.go`, where workers submit immutable
-completion facts and only the reducer mutates state, so a frame can never observe
-half-written data. What needs rework before it comes back:
-
-- Frames emit at a fixed 1 Hz (`load-tester/agent.go:130`), and each frame carries at most
-  one request/response record — so at any meaningful RPS the inspector shows an arbitrary
-  sample rather than a stream.
-- `aggregateAt` re-sorts the full latency slice per frame, and `latestEligibleRecord` scans
-  every completion ever recorded. Both are fine at 1 Hz and degrade badly above it.
-- `completions` and `latencies` grow unbounded for the life of a run.
-- Full request and response bodies are held in memory and streamed to the browser with no
-  size cap or redaction.
-- CORS is `*` and the WebSocket origin check always passes. Both are dev-only and must not
-  be deployed as-is.
 
 To run it anyway: `cd load-tester && go run .` (listens on `:8081`), then
 `cd dashboard && npm install && npm run dev`.
