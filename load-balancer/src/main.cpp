@@ -167,9 +167,26 @@ void create_connection(int epoll_fd, int client_fd, const std::vector<Backend>& 
 
     addr.sin_family = AF_INET;
     addr.sin_port = htons(b.port);
-    inet_pton(AF_INET, b.host.c_str(), &addr.sin_addr);
 
-    connect(backend_fd, (struct sockaddr*)&addr, sizeof(addr));
+    // convert IPv4 address string into its binary format for network routing
+    if (inet_pton(AF_INET, b.host.c_str(), &addr.sin_addr) <= 0) {
+        std::cerr << "invalid backend address: " << b.host << "\n";
+
+        close(backend_fd);
+        close(client_fd);
+        return;
+    }
+
+    // connect the backend TCP socket to the correct nginx backend ip address
+    if (connect(backend_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "backend connection failed: "
+                << b.host << ":" << b.port
+                << " - " << std::strerror(errno) << "\n";
+
+        close(backend_fd);
+        close(client_fd);
+        return;
+    }
 
     if (kVerbose) {
         std::cout << "backend ip connected: " << b.host << ":" << b.port << "\n";
