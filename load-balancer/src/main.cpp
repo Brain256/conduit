@@ -10,14 +10,16 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include "../include/thread_pool.hpp"
 
 
 struct Backend {
-    std::string host; 
-    int port; 
+    std::string host;
+    int port;
 };
 
 struct Config {
@@ -25,16 +27,34 @@ struct Config {
     std::vector<Backend> backends;
 };
 
-struct Connection {
-    std::uint64_t id;
-    int client_fd; 
-    int backend_fd; 
-    bool closed = false;
+enum class EndpointSide {
+    Client,
+    Backend
 };
 
-std::unordered_map<int, Connection> connections;
+struct Connection {
+    std::uint64_t id;
+    int client_fd;
+    int backend_fd;
+    std::uint64_t client_token;
+    std::uint64_t backend_token;
+    bool closed = false;
+    std::mutex io_mutex;
+};
+
+struct Endpoint {
+    std::uint64_t token;
+    int fd;
+    EndpointSide side;
+    std::shared_ptr<Connection> connection;
+};
+
+constexpr std::uint64_t kListenerToken = 0;
+
+std::unordered_map<std::uint64_t, Endpoint> endpoints;
 std::mutex connections_mutex;
 std::atomic<std::uint64_t> next_connection_id{1};
+std::atomic<std::uint64_t> next_endpoint_token{1};
 // unsigned: a signed counter wraps to negative after 2^31 connections, and a
 // negative index into backends is out-of-bounds UB.
 std::atomic<unsigned> counter{0};
@@ -106,70 +126,84 @@ const char* close_reason_name(CloseReason reason) {
     return "unknown";
 }
 
-bool close_connection(int epoll_fd, int event_fd, CloseReason reason) {
-    Connection connection;
+bool close_connection(int epoll_fd, std::uint64_t token, CloseReason reason) {
+    std::shared_ptr<Connection> connection;
 
-    // Keep the map lock through epoll removal and close. In the current fd-keyed
-    // design this prevents another setup task from registering a reused fd
-    // between removing the old fd and erasing its map entries.
     {
         std::lock_guard<std::mutex> lock(connections_mutex);
 
-        auto it = connections.find(event_fd);
-        if (it == connections.end()) {
-            diagnostic("[stale-close] fd=", event_fd,
+        auto it = endpoints.find(token);
+        if (it == endpoints.end()) {
+            diagnostic("[stale-close] token=", token,
                        " reason=", close_reason_name(reason));
             return false;
         }
 
-        if (it->second.closed) {
-            diagnostic("[duplicate-close] id=", it->second.id,
-                       " event_fd=", event_fd,
-                       " reason=", close_reason_name(reason));
-            return false;
-        }
-
-        connection = it->second;
-        it->second.closed = true;
-        connection.closed = true;
-
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, connection.client_fd, nullptr) == -1) {
-            const int error = errno;
-            diagnostic("[epoll-del-failed] id=", connection.id,
-                       " fd=", connection.client_fd,
-                       " errno=", error,
-                       " error=", std::strerror(error));
-        }
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, connection.backend_fd, nullptr) == -1) {
-            const int error = errno;
-            diagnostic("[epoll-del-failed] id=", connection.id,
-                       " fd=", connection.backend_fd,
-                       " errno=", error,
-                       " error=", std::strerror(error));
-        }
-
-        if (close(connection.client_fd) == -1) {
-            const int error = errno;
-            diagnostic("[close-failed] id=", connection.id,
-                       " fd=", connection.client_fd,
-                       " errno=", error,
-                       " error=", std::strerror(error));
-        }
-        if (close(connection.backend_fd) == -1) {
-            const int error = errno;
-            diagnostic("[close-failed] id=", connection.id,
-                       " fd=", connection.backend_fd,
-                       " errno=", error,
-                       " error=", std::strerror(error));
-        }
-
-        connections.erase(connection.client_fd);
-        connections.erase(connection.backend_fd);
+        connection = it->second.connection;
     }
 
-    diagnostic("[closed] id=", connection.id,
-               " client_fd=", connection.client_fd,
-               " backend_fd=", connection.backend_fd,
+    // Serialize cleanup with reads and writes on this logical connection.
+    std::lock_guard<std::mutex> io_lock(connection->io_mutex);
+
+    {
+        // Keep the map lock through epoll removal and close so a new endpoint
+        // cannot be registered while these fds are being retired and reused.
+        std::lock_guard<std::mutex> lock(connections_mutex);
+
+        auto it = endpoints.find(token);
+        if (it == endpoints.end()) {
+            diagnostic("[stale-close] token=", token,
+                       " reason=", close_reason_name(reason));
+            return false;
+        }
+
+        connection = it->second.connection;
+        if (connection->closed) {
+            diagnostic("[duplicate-close] id=", connection->id,
+                       " token=", token,
+                       " reason=", close_reason_name(reason));
+            return false;
+        }
+
+        connection->closed = true;
+
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, connection->client_fd, nullptr) == -1) {
+            const int error = errno;
+            diagnostic("[epoll-del-failed] id=", connection->id,
+                       " fd=", connection->client_fd,
+                       " errno=", error,
+                       " error=", std::strerror(error));
+        }
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, connection->backend_fd, nullptr) == -1) {
+            const int error = errno;
+            diagnostic("[epoll-del-failed] id=", connection->id,
+                       " fd=", connection->backend_fd,
+                       " errno=", error,
+                       " error=", std::strerror(error));
+        }
+
+        if (close(connection->client_fd) == -1) {
+            const int error = errno;
+            diagnostic("[close-failed] id=", connection->id,
+                       " fd=", connection->client_fd,
+                       " errno=", error,
+                       " error=", std::strerror(error));
+        }
+        if (close(connection->backend_fd) == -1) {
+            const int error = errno;
+            diagnostic("[close-failed] id=", connection->id,
+                       " fd=", connection->backend_fd,
+                       " errno=", error,
+                       " error=", std::strerror(error));
+        }
+
+        endpoints.erase(connection->client_token);
+        endpoints.erase(connection->backend_token);
+    }
+
+    diagnostic("[closed] id=", connection->id,
+               " client_fd=", connection->client_fd,
+               " backend_fd=", connection->backend_fd,
                " reason=", close_reason_name(reason));
     return true;
 }
@@ -183,102 +217,124 @@ void close_unregistered_sockets(int client_fd, int backend_fd, const char* reaso
     if (client_fd >= 0) close(client_fd);
 }
 
-void forward_data(int epoll_fd, int connection_fd, std::uint32_t event_flags) {
+void forward_data(int epoll_fd, std::uint64_t token, std::uint32_t event_flags) {
     char buffer[4096] = {0};
-
-    Connection c;
+    Endpoint endpoint;
 
     {
         std::lock_guard<std::mutex> lock(connections_mutex);
 
-        auto it = connections.find(connection_fd);
-        if (it == connections.end()) {
-            diagnostic("[stale-event] fd=", connection_fd,
+        auto it = endpoints.find(token);
+        if (it == endpoints.end()) {
+            diagnostic("[stale-event] token=", token,
                        " events=0x", std::hex, event_flags, std::dec);
             return;
         }
 
-        c = it->second;
+        endpoint = it->second;
     }
 
-    diagnostic("[event] id=", c.id,
-               " fd=", connection_fd,
-               " client_fd=", c.client_fd,
-               " backend_fd=", c.backend_fd,
+    const std::shared_ptr<Connection>& connection = endpoint.connection;
+    std::unique_lock<std::mutex> io_lock(connection->io_mutex);
+
+    if (connection->closed) {
+        diagnostic("[closed-event] id=", connection->id,
+                   " token=", token,
+                   " fd=", endpoint.fd);
+        return;
+    }
+
+    diagnostic("[event] id=", connection->id,
+               " token=", token,
+               " fd=", endpoint.fd,
+               " client_fd=", connection->client_fd,
+               " backend_fd=", connection->backend_fd,
                " events=0x", std::hex, event_flags, std::dec);
 
-    ssize_t bytes_read = read(connection_fd, buffer, sizeof(buffer));
+    ssize_t bytes_read = read(endpoint.fd, buffer, sizeof(buffer));
 
     if (bytes_read <= 0) {
         int read_errno = bytes_read < 0 ? errno : 0;
-        diagnostic("[read-close] id=", c.id,
-                   " fd=", connection_fd,
+        diagnostic("[read-close] id=", connection->id,
+                   " token=", token,
+                   " fd=", endpoint.fd,
                    " bytes=", bytes_read,
                    " errno=", read_errno,
                    " error=", read_errno == 0 ? "none" : std::strerror(read_errno));
 
-        close_connection(
-            epoll_fd,
-            connection_fd,
-            bytes_read == 0 ? CloseReason::ClientClosed : CloseReason::ReadError
-        );
+        const CloseReason reason = bytes_read < 0
+            ? CloseReason::ReadError
+            : endpoint.side == EndpointSide::Client
+                ? CloseReason::ClientClosed
+                : CloseReason::BackendClosed;
+
+        io_lock.unlock();
+        close_connection(epoll_fd, token, reason);
         return;
+    }
 
-    } else {
-        int fd = 0;
-        if (connection_fd == c.client_fd) {
-            fd = c.backend_fd;
+    const int destination_fd = endpoint.side == EndpointSide::Client
+        ? connection->backend_fd
+        : connection->client_fd;
+
+    ssize_t total_written = 0;
+    int write_errno = 0;
+
+    while (total_written < bytes_read) {
+        ssize_t n = write(
+            destination_fd,
+            buffer + total_written,
+            bytes_read - total_written
+        );
+
+        if (n < 0) {
+            write_errno = errno;
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+
+        total_written += n;
+    }
+
+    if (total_written != bytes_read) {
+        diagnostic("[write-incomplete] id=", connection->id,
+                   " token=", token,
+                   " source_fd=", endpoint.fd,
+                   " destination_fd=", destination_fd,
+                   " read_bytes=", bytes_read,
+                   " written_bytes=", total_written,
+                   " errno=", write_errno,
+                   " error=", write_errno == 0 ? "write returned zero" : std::strerror(write_errno));
+
+        io_lock.unlock();
+        close_connection(epoll_fd, token, CloseReason::WriteError);
+        return;
+    }
+
+    if (kVerbose) {
+        if (endpoint.side == EndpointSide::Client) {
+            std::cout << total_written << " bytes written to backend\n";
         } else {
-            fd = c.client_fd;
+            std::cout << total_written << " bytes written to client\n";
         }
+    }
 
-        ssize_t total_written = 0;
-        int write_errno = 0;
+    struct epoll_event ev{};
+    ev.events = EPOLLIN | EPOLLONESHOT;
+    ev.data.u64 = token;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, endpoint.fd, &ev) == -1) {
+        const int error = errno;
+        diagnostic("[epoll-mod-failed] id=", connection->id,
+                   " token=", token,
+                   " fd=", endpoint.fd,
+                   " errno=", error,
+                   " error=", std::strerror(error));
 
-        while (total_written < bytes_read) {
-            ssize_t n = write(fd, buffer + total_written, bytes_read - total_written);
-
-            if (n < 0) {
-                write_errno = errno;
-                break;
-            }
-            if (n == 0) {
-                break;
-            }
-
-            total_written += n;
-        }
-
-        if (total_written != bytes_read) {
-            diagnostic("[write-incomplete] id=", c.id,
-                       " source_fd=", connection_fd,
-                       " destination_fd=", fd,
-                       " read_bytes=", bytes_read,
-                       " written_bytes=", total_written,
-                       " errno=", write_errno,
-                       " error=", write_errno == 0 ? "write returned zero" : std::strerror(write_errno));
-
-            close_connection(epoll_fd, connection_fd, CloseReason::WriteError);
-            return;
-        }
-
-        if (kVerbose) {
-            if (connection_fd == c.client_fd) {
-                std::cout << total_written << " bytes written to backend\n";
-            } else {
-                std::cout << total_written << " bytes written to client\n";
-            }
-        }
-
-        struct epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLONESHOT;
-        ev.data.fd = connection_fd;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, connection_fd, &ev) == -1) {
-            diagnostic("[epoll-mod-failed] id=", c.id,
-                       " fd=", connection_fd,
-                       " errno=", errno,
-                       " error=", std::strerror(errno));
-        }
+        io_lock.unlock();
+        close_connection(epoll_fd, token, CloseReason::EpollError);
+        return;
     }
 }
 
@@ -336,38 +392,65 @@ void create_connection(int epoll_fd, int client_fd, const std::vector<Backend>& 
         std::cout << "backend ip connected: " << b.host << ":" << b.port << "\n";
     }
 
+    auto connection = std::make_shared<Connection>();
+    connection->id = connection_id;
+    connection->client_fd = client_fd;
+    connection->backend_fd = backend_fd;
+    connection->client_token = next_endpoint_token.fetch_add(1, std::memory_order_relaxed);
+    connection->backend_token = next_endpoint_token.fetch_add(1, std::memory_order_relaxed);
+
     {
         std::lock_guard<std::mutex> lock(connections_mutex);
-        connections[client_fd] = {connection_id, client_fd, backend_fd, false};
-        connections[backend_fd] = {connection_id, client_fd, backend_fd, false};
+        endpoints.emplace(
+            connection->client_token,
+            Endpoint{
+                connection->client_token,
+                client_fd,
+                EndpointSide::Client,
+                connection
+            }
+        );
+        endpoints.emplace(
+            connection->backend_token,
+            Endpoint{
+                connection->backend_token,
+                backend_fd,
+                EndpointSide::Backend,
+                connection
+            }
+        );
     }
 
     struct epoll_event ev{};
     ev.events = EPOLLIN | EPOLLONESHOT;
 
-    ev.data.fd = client_fd;
+    ev.data.u64 = connection->client_token;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
         const int error = errno;
         diagnostic("[epoll-add-failed] id=", connection_id,
+                   " token=", connection->client_token,
                    " fd=", client_fd,
                    " errno=", error,
                    " error=", std::strerror(error));
-        close_connection(epoll_fd, client_fd, CloseReason::EpollError);
+        close_connection(epoll_fd, connection->client_token, CloseReason::EpollError);
         return;
     }
 
-    ev.data.fd = backend_fd;
+    ev.data.u64 = connection->backend_token;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, backend_fd, &ev) == -1) {
         const int error = errno;
         diagnostic("[epoll-add-failed] id=", connection_id,
+                   " token=", connection->backend_token,
                    " fd=", backend_fd,
                    " errno=", error,
                    " error=", std::strerror(error));
-        close_connection(epoll_fd, backend_fd, CloseReason::EpollError);
+        close_connection(epoll_fd, connection->backend_token, CloseReason::EpollError);
         return;
     }
 
     diagnostic("[registered] id=", connection_id,
+               " client_token=", connection->client_token,
+               " backend_token=", connection->backend_token,
                " client_fd=", client_fd,
                " backend_fd=", backend_fd,
                " backend=", b.host, ":", b.port);
@@ -417,7 +500,7 @@ int main() {
 
     struct epoll_event ev{}; 
     ev.events = EPOLLIN; 
-    ev.data.fd = balancer_fd; 
+    ev.data.u64 = kListenerToken; 
 
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, balancer_fd, &ev); 
 
@@ -442,7 +525,7 @@ int main() {
         for (int i = 0; i < n; ++i) {
             const std::uint32_t event_flags = events[i].events;
 
-            if (events[i].data.fd == balancer_fd) {
+            if (events[i].data.u64 == kListenerToken) {
                 // new client connection
                 while (true) {
                     struct sockaddr_in client_addr{};
@@ -470,14 +553,14 @@ int main() {
                     );
                 }
             } else {
-                // existing connection, forward the data
-                int event_fd = events[i].data.fd;
+                // Existing connection endpoint, identified by a non-reused token.
+                const std::uint64_t token = events[i].data.u64;
 
-                diagnostic("[queued-event] fd=", event_fd,
+                diagnostic("[queued-event] token=", token,
                            " events=0x", std::hex, event_flags, std::dec);
 
-                thread_pool.submit([epoll_fd, event_fd, event_flags] () {
-                        forward_data(epoll_fd, event_fd, event_flags);
+                thread_pool.submit([epoll_fd, token, event_flags] () {
+                        forward_data(epoll_fd, token, event_flags);
                     }
                 );
             }
