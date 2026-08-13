@@ -1,1 +1,80 @@
 @import "tailwindcss";
+
+/* Dark, low-chroma surfaces so the metric colours are the only saturated
+   things on screen and the eye lands on data first. */
+@theme {
+  --color-canvas: #080b11;
+  --color-surface: #0f151f;
+  --color-elevated: #151d2a;
+  --color-edge: #1e2938;
+  --color-edge-strong: #2b3a4e;
+  --color-ink: #e8eef8;
+  --color-muted: #8a9ab2;
+  --color-faint: #5c6b81;
+
+  --color-accent: #38bdf8;
+  --color-p50: #34d399;
+  --color-p95: #fbbf24;
+  --color-p99: #fb7185;
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-danger: #f43f5e;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Live-updating numbers jitter when glyph widths differ, which reads as the UI
+   being unstable. Fixed-width digits keep them still. */
+.metric-number {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-edge-strong);
+  border-radius: 999px;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.live-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}

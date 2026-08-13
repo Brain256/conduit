@@ -79,10 +79,11 @@ func runTest(run *TestRun, out chan<- MetricFrame) {
 
 	parameters := run.parameters
 	duration := time.Duration(parameters.DurationSeconds) * time.Second
-	targetURL := fmt.Sprintf("http://localhost:%d", parameters.Port)
+	// 127.0.0.1, not localhost: the balancer binds IPv4 only, so a dual-stack
+	// resolver tries ::1 first and burns a failed connect on every request. With
+	// keep-alives disabled that cost is paid per request and lands in PingMS.
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d", parameters.Port)
 
-	tokens := make(chan struct{}, parameters.TargetRPS)
-	interval := time.Second / time.Duration(parameters.TargetRPS)
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 
@@ -93,32 +94,63 @@ func runTest(run *TestRun, out chan<- MetricFrame) {
 		},
 	}
 
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		defer close(tokens)
+	// Closed mode paces work through a token bucket, making TargetRPS a
+	// ceiling. Open mode has no pacer at all: workers loop flat out so the
+	// achieved rate reveals the maximum rather than the requested rate.
+	var tokens chan struct{}
+	if parameters.LoadMode != LoadModeOpen {
+		tokens = make(chan struct{}, parameters.TargetRPS)
+		interval := time.Second / time.Duration(parameters.TargetRPS)
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			defer close(tokens)
+
+			for {
 				select {
-				case tokens <- struct{}{}:
-				default:
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					select {
+					case tokens <- struct{}{}:
+					default:
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
-	completions := make(chan RequestCompletion, parameters.TargetRPS)
+	buffer := parameters.TargetRPS
+	if buffer < 1024 {
+		buffer = 1024
+	}
+	completions := make(chan RequestCompletion, buffer)
+
+	// A request still in flight when the test window closes was cut off by the
+	// deadline, not by the target, so it is dropped rather than counted as a
+	// target failure. Otherwise every run would end with up to one phantom
+	// failure per worker.
+	submit := func(completion RequestCompletion) {
+		if completion.Failure != "" && ctx.Err() != nil {
+			return
+		}
+		completions <- completion
+	}
+
 	var workers sync.WaitGroup
 	for i := 0; i < parameters.Workers; i++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			if parameters.LoadMode == LoadModeOpen {
+				for ctx.Err() == nil {
+					submit(executeRequestAttempt(client, ctx, targetURL))
+				}
+				return
+			}
 			for range tokens {
-				completions <- executeRequestAttempt(client, ctx, targetURL)
+				submit(executeRequestAttempt(client, ctx, targetURL))
 			}
 		}()
 	}

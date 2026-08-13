@@ -3,6 +3,7 @@ import type {
   FinalSummary,
   FinalSummaryExportSnapshot,
   GraphDatum,
+  LoadMode,
   SessionFinal,
   TestParameters,
 } from '../types/metrics';
@@ -173,6 +174,7 @@ function readFinalSummary(value: unknown): FinalSummary | null {
       duration_seconds: value.parameters.duration_seconds,
       target_rps: value.parameters.target_rps,
       workers: value.parameters.workers,
+      load_mode: value.parameters.load_mode,
     },
     elapsed_seconds: value.elapsed_seconds,
     completed_count: value.completed_count,
@@ -209,8 +211,18 @@ function isValidTestParameters(value: unknown): value is TestParameters {
   return isRecord(value)
     && isPort(value.port)
     && isPositiveFinite(value.duration_seconds)
-    && isPositiveFinite(value.target_rps)
+    && isValidLoadMode(value.load_mode)
+    && isValidTargetRate(value.load_mode, value.target_rps)
     && isPositiveCount(value.workers);
+}
+
+function isValidLoadMode(value: unknown): value is LoadMode {
+  return value === 'closed' || value === 'open';
+}
+
+/** Open mode is unpaced, so a target rate is absent there rather than positive. */
+function isValidTargetRate(loadMode: unknown, targetRPS: unknown): boolean {
+  return loadMode === 'open' ? targetRPS === 0 : isPositiveFinite(targetRPS);
 }
 
 function copyAndFreezeSummary(summary: FinalSummary): Readonly<FinalSummary> {

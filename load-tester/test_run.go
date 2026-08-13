@@ -8,12 +8,27 @@ import (
 	"time"
 )
 
+// LoadMode selects how workers pace their requests.
+type LoadMode string
+
+const (
+	// LoadModeClosed paces requests with a token bucket so TargetRPS acts as a
+	// ceiling. It answers "did the target keep up with this rate".
+	LoadModeClosed LoadMode = "closed"
+	// LoadModeOpen drops the pacer and lets every worker send flat out, so
+	// achieved throughput becomes workers/mean-latency. It answers "what is the
+	// maximum". TargetRPS is not used and is reported as 0.
+	LoadModeOpen LoadMode = "open"
+)
+
 // TestParameters are the immutable settings supplied when a test starts.
+// TargetRPS is meaningful only when LoadMode is LoadModeClosed.
 type TestParameters struct {
-	Port            int `json:"port"`
-	DurationSeconds int `json:"duration_seconds"`
-	TargetRPS       int `json:"target_rps"`
-	Workers         int `json:"workers"`
+	Port            int      `json:"port"`
+	DurationSeconds int      `json:"duration_seconds"`
+	TargetRPS       int      `json:"target_rps"`
+	Workers         int      `json:"workers"`
+	LoadMode        LoadMode `json:"load_mode"`
 }
 
 // AggregateMetrics are cumulative measurements for a test at a frame time.

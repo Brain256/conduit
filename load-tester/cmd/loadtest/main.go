@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -101,14 +102,22 @@ func main() {
 			return
 		}
 
+		if _, bodyErr := io.Copy(io.Discard, resp.Body); bodyErr != nil {
+			resp.Body.Close()
+			results <- Result{err: bodyErr}
+			return
+		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			results <- Result{err: closeErr}
+			return
+		}
+
 		latency := time.Since(start)
 		if *verbose {
 			fmt.Println("ping response time:", latency)
 		}
 
 		results <- Result{latency: latency}
-
-		resp.Body.Close()
 	}
 
 	// worker goroutines

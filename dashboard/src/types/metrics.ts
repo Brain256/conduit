@@ -1,8 +1,22 @@
 export interface AgentMetrics { agent_id: string; throughput_rps: number; p50_ms: number; p95_ms: number; p99_ms: number; }
 export interface BackendHealthEntry { backend: string; healthy: boolean; }
 
-/** The immutable configuration used to execute a test. */
-export interface TestParameters { port: number; duration_seconds: number; target_rps: number; workers: number; }
+/**
+ * How workers pace requests. `closed` holds `target_rps` as a ceiling and
+ * answers "did the target keep up"; `open` removes the pacer so achieved
+ * throughput reveals the maximum.
+ */
+export type LoadMode = 'closed' | 'open';
+
+/** The immutable configuration used to execute a test. `target_rps` is meaningful only in `closed` mode, and is 0 in `open` mode. */
+export interface TestParameters { port: number; duration_seconds: number; target_rps: number; workers: number; load_mode: LoadMode; }
+
+/**
+ * The configuration the operator submitted for the active run, known locally as
+ * soon as the run starts. The authoritative copy still arrives in the final
+ * summary; this exists so the live view can label and scale itself before then.
+ */
+export type ActiveRunConfig = Readonly<TestParameters>;
 
 /** Per-frame aggregate measurements. Durations are seconds; ping values are milliseconds. */
 export interface AggregateMetrics { throughput_rps: number; completed_count: number; failed_count: number; p50_ms: number; p95_ms: number; p99_ms: number; }
@@ -44,4 +58,4 @@ export type SessionFinal = Readonly<{
   summary: Readonly<FinalSummary>; export_snapshot: FinalSummaryExportSnapshot;
 }>;
 
-export interface TestConfig { target_rps: number; duration_seconds: number; }
+export interface TestConfig { target_rps: number; duration_seconds: number; load_mode: LoadMode; }

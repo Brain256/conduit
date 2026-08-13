@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,10 +15,50 @@ import (
 )
 
 type TestRequest struct {
-	Port     int `json:"port"`
-	Duration int `json:"dur"`
-	Rps      int `json:"rps"`
-	Workers  int `json:"workers"`
+	Port     int    `json:"port"`
+	Duration int    `json:"dur"`
+	Rps      int    `json:"rps"`
+	Workers  int    `json:"workers"`
+	Mode     string `json:"mode"`
+}
+
+// testParameters validates a start request and resolves it to the immutable
+// parameters a run executes with. Mode defaults to closed so existing clients
+// keep working. Closed mode requires a positive rate because it divides by it
+// to size the pacer interval; open mode ignores the rate entirely.
+func testParameters(request TestRequest) (TestParameters, error) {
+	mode := LoadMode(strings.TrimSpace(strings.ToLower(request.Mode)))
+	if mode == "" {
+		mode = LoadModeClosed
+	}
+	if mode != LoadModeClosed && mode != LoadModeOpen {
+		return TestParameters{}, fmt.Errorf("mode must be %q or %q", LoadModeClosed, LoadModeOpen)
+	}
+	if request.Port < 1 || request.Port > 65535 {
+		return TestParameters{}, errors.New("port must be between 1 and 65535")
+	}
+	if request.Duration < 1 {
+		return TestParameters{}, errors.New("dur must be at least 1 second")
+	}
+	if request.Workers < 1 {
+		return TestParameters{}, errors.New("workers must be at least 1")
+	}
+
+	rate := 0
+	if mode == LoadModeClosed {
+		if request.Rps < 1 {
+			return TestParameters{}, errors.New("rps must be at least 1 in closed mode")
+		}
+		rate = request.Rps
+	}
+
+	return TestParameters{
+		Port:            request.Port,
+		DurationSeconds: request.Duration,
+		TargetRPS:       rate,
+		Workers:         request.Workers,
+		LoadMode:        mode,
+	}, nil
 }
 
 var upgrader = websocket.Upgrader{
@@ -50,14 +93,15 @@ func startTestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	parameters, err := testParameters(reqData)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	testID := uuid.New().String()
 	frames := make(chan MetricFrame, 64)
-	run := NewTestRun(testID, TestParameters{
-		Port:            reqData.Port,
-		DurationSeconds: reqData.Duration,
-		TargetRPS:       reqData.Rps,
-		Workers:         reqData.Workers,
-	}, time.Now().UTC())
+	run := NewTestRun(testID, parameters, time.Now().UTC())
 	addSession(testID, frames)
 
 	go runTest(run, frames)

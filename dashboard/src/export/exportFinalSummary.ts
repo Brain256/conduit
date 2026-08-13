@@ -16,8 +16,13 @@ const positiveFinite = (value: unknown): value is number => finiteNonNegative(va
 const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 function parameters(value: unknown): value is TestParameters {
+  // Open mode has no pacer, so target_rps is legitimately 0 there and is only
+  // required to be positive in closed mode.
+  const rate = value as Record<string, unknown>;
+  const validRate = rate?.load_mode === 'open' ? rate.target_rps === 0 : positiveFinite(rate?.target_rps);
   return isRecord(value) && typeof value.port === 'number' && Number.isSafeInteger(value.port) && value.port > 0 && value.port <= 65535
-    && positiveFinite(value.duration_seconds) && positiveFinite(value.target_rps) && typeof value.workers === 'number' && Number.isSafeInteger(value.workers) && value.workers > 0;
+    && positiveFinite(value.duration_seconds) && validRate && (value.load_mode === 'open' || value.load_mode === 'closed')
+    && typeof value.workers === 'number' && Number.isSafeInteger(value.workers) && value.workers > 0;
 }
 function ordered(values: Record<string, unknown>): boolean {
   return finiteNonNegative(values.p50_ms) && finiteNonNegative(values.p95_ms) && finiteNonNegative(values.p99_ms) && values.p50_ms <= values.p95_ms && values.p95_ms <= values.p99_ms;
@@ -59,10 +64,11 @@ export function createLatencySvg(snapshot: FinalSummaryExportSnapshot): string {
   const yMax = Math.max(1, ...snapshot.graph_data.map((datum) => datum.p99_ms));
   const series = (metric: 'p50_ms' | 'p95_ms' | 'p99_ms', color: string) => `<polyline fill="none" stroke="${color}" stroke-width="3" points="${snapshot.graph_data.map((datum) => point(datum, metric, xMax, yMax)).join(' ')}"/>`;
   const metadata = [
-    `Test ID: ${summary.test_id}`, `Port: ${summary.parameters.port}`, `Duration: ${summary.parameters.duration_seconds} s`, `Target RPS: ${summary.parameters.target_rps}`, `Workers: ${summary.parameters.workers}`,
+    `Test ID: ${summary.test_id}`, `Port: ${summary.parameters.port}`, `Load mode: ${summary.parameters.load_mode}`, `Duration: ${summary.parameters.duration_seconds} s`,
+    summary.parameters.load_mode === 'open' ? 'Target RPS: unpaced' : `Target RPS: ${summary.parameters.target_rps}`, `Workers: ${summary.parameters.workers}`,
     `Actual elapsed: ${summary.elapsed_seconds} s`, `Completed: ${summary.completed_count}`, `Failed: ${summary.failed_count}`, `Achieved throughput: ${summary.achieved_throughput_rps} rps`, `p50: ${summary.p50_ms} ms`, `p95: ${summary.p95_ms} ms`, `p99: ${summary.p99_ms} ms`,
   ];
-  return `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760"><style>text{font-family:Arial,sans-serif;fill:#172033}.axis{stroke:#334155}.grid{stroke:#cbd5e1;stroke-dasharray:4 4}</style><rect width="1200" height="760" fill="white"/><text x="90" y="35" font-size="24">Latency graph</text><line class="axis" x1="90" y1="505" x2="1130" y2="505"/><line class="axis" x1="90" y1="70" x2="90" y2="505"/><text x="500" y="545">Elapsed test time (seconds)</text><text x="25" y="290" transform="rotate(-90 25 290)">Ping time (milliseconds)</text><text x="90" y="60">0</text><text x="1080" y="525">${number(xMax)}</text><text x="45" y="500">0</text><text x="35" y="85">${number(yMax)}</text><line class="grid" x1="90" y1="287.5" x2="1130" y2="287.5"/>${series('p50_ms', '#22c55e')}${series('p95_ms', '#eab308')}${series('p99_ms', '#ef4444')}<text x="90" y="575" fill="#22c55e">p50 ping time</text><text x="250" y="575" fill="#eab308">p95 ping time</text><text x="410" y="575" fill="#ef4444">p99 ping time</text>${metadata.map((line, index) => `<text x="90" y="${610 + (index % 6) * 23}" ${index >= 6 ? 'dx="500"' : ''}>${escapeXml(line)}</text>`).join('')}</svg>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760"><style>text{font-family:Arial,sans-serif;fill:#172033}.axis{stroke:#334155}.grid{stroke:#cbd5e1;stroke-dasharray:4 4}</style><rect width="1200" height="760" fill="white"/><text x="90" y="35" font-size="24">Latency graph</text><line class="axis" x1="90" y1="505" x2="1130" y2="505"/><line class="axis" x1="90" y1="70" x2="90" y2="505"/><text x="500" y="545">Elapsed test time (seconds)</text><text x="25" y="290" transform="rotate(-90 25 290)">Ping time (milliseconds)</text><text x="90" y="60">0</text><text x="1080" y="525">${number(xMax)}</text><text x="45" y="500">0</text><text x="35" y="85">${number(yMax)}</text><line class="grid" x1="90" y1="287.5" x2="1130" y2="287.5"/>${series('p50_ms', '#22c55e')}${series('p95_ms', '#eab308')}${series('p99_ms', '#ef4444')}<text x="90" y="575" fill="#22c55e">p50 ping time</text><text x="250" y="575" fill="#eab308">p95 ping time</text><text x="410" y="575" fill="#ef4444">p99 ping time</text>${metadata.map((line, index) => { const rows = Math.ceil(metadata.length / 2); return `<text x="90" y="${610 + (index % rows) * 23}" ${index >= rows ? 'dx="500"' : ''}>${escapeXml(line)}</text>`; }).join('')}</svg>`;
 }
 
 function browserDownload(content: string, filename: string, mimeType: string): void {
